@@ -64,7 +64,12 @@ from isaaclab.envs import (
     multi_agent_to_single_agent,
 )
 from isaaclab.utils.dict import print_dict
-from isaaclab.utils.io import dump_pickle, dump_yaml
+#use below for IsaacLab verison 2.2.1
+#from isaaclab.utils.io import dump_pickle, dump_yaml
+
+#I'm using IsaacLab verison 2.3.1 which does not have dump_pickle, so using pickle directly
+import pickle
+from isaaclab.utils.io import dump_yaml
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
@@ -106,15 +111,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_dir = os.path.join(log_root_path, log_dir)
 
     # TODO ----- START ----- Define rewards scales
-    # reward scales
-    progress_goal_reward_scale = 50.0
-    crash_reward = -1.0
-    death_cost = -10.0
+    gate_pass_reward_scale = 100.0   # large reward per gate passed
+    progress_reward_scale  = 2.0     # dense shaping: reward for closing distance to gate
+    crash_reward_scale     = -1.0    # per-step penalty when in contact
+    death_cost             = -50.0   # terminal penalty for crashing / leaving bounds
 
     rewards = {
-        'progress_goal_reward_scale': progress_goal_reward_scale,
-        'crash_reward_scale': crash_reward,
-        'death_cost': death_cost,
+        'gate_pass_reward_scale': gate_pass_reward_scale,
+        'progress_reward_scale':  progress_reward_scale,
+        'crash_reward_scale':     crash_reward_scale,
+        'death_cost':             death_cost,
     }
     # TODO ----- END -----
 
@@ -160,8 +166,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
-    dump_pickle(os.path.join(log_dir, "params", "env.pkl"), env_cfg)
-    dump_pickle(os.path.join(log_dir, "params", "agent.pkl"), agent_cfg)
+    #uncomment below to use dump_pickle if using IsaacLab verison 2.2.1
+    #dump_pickle(os.path.join(log_dir, "params", "env.pkl"), env_cfg)
+    #dump_pickle(os.path.join(log_dir, "params", "agent.pkl"), agent_cfg)
+
+    #comment out below if using dump_pickle
+    with open(os.path.join(log_dir, "params", "env.pkl"), "wb") as f:
+        pickle.dump(env_cfg, f)
+    with open(os.path.join(log_dir, "params", "agent.pkl"), "wb") as f:
+        pickle.dump(agent_cfg, f)
 
     # run training
     runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
