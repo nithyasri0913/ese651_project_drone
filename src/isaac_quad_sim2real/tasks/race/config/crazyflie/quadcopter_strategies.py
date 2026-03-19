@@ -74,13 +74,16 @@ class DefaultQuadcopterStrategy:
         # Gate crossing: detect when x in gate frame flips positive -> negative
         x_gate_now = self.env._pose_drone_wrt_gate[:, 0]
         gate_half = self.env.cfg.gate_model.gate_side / 2.0
+        dist_to_gate = torch.linalg.norm(self.env._pose_drone_wrt_gate, dim=1)
         gate_crossed = (self.env._prev_x_drone_wrt_gate > 0) & (x_gate_now <= 0)
         within_gate = (
             torch.abs(self.env._pose_drone_wrt_gate[:, 1]) < gate_half * 1.2
         ) & (
             torch.abs(self.env._pose_drone_wrt_gate[:, 2]) < gate_half * 1.2
         )
-        gate_passed = gate_crossed & within_gate
+        # Must be within 2m of gate center when crossing (prevents incidental far-field triggers)
+        near_gate = dist_to_gate < 2.0
+        gate_passed = gate_crossed & within_gate & near_gate
 
         # Advance waypoint and update desired position for envs that passed a gate
         ids_gate_passed = torch.where(gate_passed)[0]
@@ -104,8 +107,7 @@ class DefaultQuadcopterStrategy:
                 self.env._pose_drone_wrt_gate[ids_gate_passed], dim=1
             )
 
-        # Progress reward: improvement in distance to current gate
-        dist_to_gate = torch.linalg.norm(self.env._pose_drone_wrt_gate, dim=1)
+        # Progress reward: improvement in distance to current gate (dist_to_gate computed above)
         progress_delta = (self.env._last_distance_to_goal - dist_to_gate).clamp(min=0.0, max=1.0)
         self.env._last_distance_to_goal = dist_to_gate.clone()
 
@@ -120,11 +122,50 @@ class DefaultQuadcopterStrategy:
         mask = (self.env.episode_length_buf > 100).int()
         self.env._crashed = self.env._crashed + crashed * mask
 
+        # --- Approach shaping (powerloop gate only: wp index 3) ---
+        is_powerloop_gate = (self.env._idx_wp == 3).float()
+        gate_normal_w = self.env._normal_vectors[self.env._idx_wp]  # (N, 3) world-frame gate normal
+        drone_vel_w = self.env._robot.data.root_com_lin_vel_w       # (N, 3) world-frame velocity
+
+        k = 2.0
+        proximity_weight = torch.exp(-dist_to_gate)
+
+        # 1. Approach reward: only when on correct (+x) side — clamped to prevent boundary farming
+        on_correct_side = (x_gate_now > 0).float()
+        approach_reward = torch.tanh(k * x_gate_now) * on_correct_side * proximity_weight * is_powerloop_gate
+
+        # 2. Velocity alignment: reward moving against gate normal (correct crossing direction)
+        vel_alignment = torch.tanh(-torch.sum(drone_vel_w * gate_normal_w, dim=1)) * proximity_weight * is_powerloop_gate
+
+        # 3. Centering reward: reduced scale, only near the gate — prevent reward farming
+        lateral_offset = torch.linalg.norm(self.env._pose_drone_wrt_gate[:, 1:3], dim=1)
+        centering_reward = torch.exp(-lateral_offset ** 2) * proximity_weight
+
+        # 4. Directional progress: purely directional (normalized), bounded with tanh
+        vel_norm = drone_vel_w / (torch.norm(drone_vel_w, dim=1, keepdim=True) + 1e-6)
+        gate_norm = -gate_normal_w / (torch.norm(gate_normal_w, dim=1, keepdim=True) + 1e-6)
+        progress_directional = torch.tanh(torch.sum(vel_norm * gate_norm, dim=1))
+
+        # 5. Commit-forward bonus: after passing gate 3 (idx_wp==4), reward velocity toward gate 4
+        #    Directional — "go there" not "leave here" — avoids unbounded/misaligned escape
+        is_post_powerloop = (self.env._idx_wp == 4).float()
+        gate4_pos = self.env._waypoints[4, :3]
+        dir_to_gate4 = gate4_pos - self.env._robot.data.root_link_pos_w
+        dir_to_gate4 = dir_to_gate4 / (torch.norm(dir_to_gate4, dim=1, keepdim=True) + 1e-6)
+        commit_reward = torch.tanh(torch.sum(drone_vel_w * dir_to_gate4, dim=1))
+        loose_proximity = torch.exp(-0.5 * dist_to_gate)
+        commit_reward = commit_reward * loose_proximity * is_post_powerloop
+
         if self.cfg.is_train:
             rewards = {
-                "gate_pass": gate_passed.float() * self.env.rew['gate_pass_reward_scale'],
-                "progress": progress_delta * self.env.rew['progress_reward_scale'],
-                "crash": crashed.float() * self.env.rew['crash_reward_scale'],
+                "gate_pass":     gate_passed.float() * self.env.rew['gate_pass_reward_scale'],
+                "progress":      progress_delta * self.env.rew['progress_reward_scale'],
+                "progress_dir":  progress_directional * self.env.rew['progress_dir_reward_scale'],
+                "crash":         crashed.float() * self.env.rew['crash_reward_scale'],
+                "approach":      approach_reward * self.env.rew['approach_reward_scale'],
+                "vel_alignment": vel_alignment * self.env.rew['vel_alignment_reward_scale'],
+                "centering":     centering_reward * self.env.rew['centering_reward_scale'],
+                "commit":        commit_reward * self.env.rew['commit_reward_scale'],
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
             reward = torch.where(
@@ -233,10 +274,19 @@ class DefaultQuadcopterStrategy:
 
         default_root_state = self.env._robot.data.default_root_state[env_ids]
 
-        # Start from gate 0 (beginning of the race)
-        waypoint_indices = torch.zeros(n_reset, device=self.device, dtype=self.env._idx_wp.dtype)
+        # Curriculum reset: 70% start at gate 0, 30% start at a random earlier gate (0-3)
+        # This forces the policy to practice the gate 4+ segment
+        if self.cfg.is_train:
+            rand = torch.rand(n_reset, device=self.device)
+            waypoint_indices = torch.where(
+                rand < 0.7,
+                torch.zeros(n_reset, device=self.device, dtype=self.env._idx_wp.dtype),
+                torch.randint(0, 4, (n_reset,), device=self.device, dtype=self.env._idx_wp.dtype),
+            )
+        else:
+            waypoint_indices = torch.zeros(n_reset, device=self.device, dtype=self.env._idx_wp.dtype)
 
-        # Get starting pose 2m behind gate in approach direction
+        # get starting pose 2m behind gate in approach direction
         x0_wp = self.env._waypoints[waypoint_indices][:, 0]
         y0_wp = self.env._waypoints[waypoint_indices][:, 1]
         theta  = self.env._waypoints[waypoint_indices][:, -1]
@@ -247,7 +297,7 @@ class DefaultQuadcopterStrategy:
         y_local = torch.empty(n_reset, device=self.device).uniform_(-0.4, 0.4)
         z_local = torch.empty(n_reset, device=self.device).uniform_(-0.2, 0.2)
 
-        # Rotate local offset into world frame
+        # rotate local offset into world frame
         cos_theta = torch.cos(theta)
         sin_theta = torch.sin(theta)
         x_rot = cos_theta * x_local - sin_theta * y_local
