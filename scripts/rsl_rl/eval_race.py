@@ -147,6 +147,40 @@ def main():
     for k in param_keys:
         print(f"  {k}: selected in {counts.get(k, 0)}/{num_envs} envs ({100*counts.get(k, 0)/num_envs:.1f}%)")
 
+    # Spot-check: verify sampled values are within expected ranges
+    param_readers = {
+        'twr':         lambda: raw_env._thrust_to_weight,
+        'k_aero_xy':   lambda: raw_env._K_aero[:, 0],
+        'k_aero_z':    lambda: raw_env._K_aero[:, 2],
+        'kp_omega_rp': lambda: raw_env._kp_omega[:, 0],
+        'ki_omega_rp': lambda: raw_env._ki_omega[:, 0],
+        'kd_omega_rp': lambda: raw_env._kd_omega[:, 0],
+        'kp_omega_y':  lambda: raw_env._kp_omega[:, 2],
+        'ki_omega_y':  lambda: raw_env._ki_omega[:, 2],
+        'kd_omega_y':  lambda: raw_env._kd_omega[:, 2],
+    }
+    nominal_values = {
+        'twr':         raw_env._twr_value,
+        'k_aero_xy':   raw_env._k_aero_xy_value,
+        'k_aero_z':    raw_env._k_aero_z_value,
+        'kp_omega_rp': raw_env._kp_omega_rp_value,
+        'ki_omega_rp': raw_env._ki_omega_rp_value,
+        'kd_omega_rp': raw_env._kd_omega_rp_value,
+        'kp_omega_y':  raw_env._kp_omega_y_value,
+        'ki_omega_y':  raw_env._ki_omega_y_value,
+        'kd_omega_y':  raw_env._kd_omega_y_value,
+    }
+    print(f"\n[EVAL] DR spot-check (nominal | range | actual min/max across envs):")
+    for k in param_keys:
+        vals = param_readers[k]()
+        lo, hi = dr[k]
+        nom = nominal_values[k]
+        v_min, v_max = vals.min().item(), vals.max().item()
+        n_randomized = counts.get(k, 0)
+        n_nominal = num_envs - n_randomized
+        n_at_nom = (vals == nom).sum().item()
+        print(f"  {k:14s}: nominal={nom:.6f}  range=[{lo:.6f}, {hi:.6f}]  actual=[{v_min:.6f}, {v_max:.6f}]  at_nominal={n_at_nom}/{n_nominal} expected")
+
     # --- Reposition all drones with TA-spec spawn (ground level, randomized position) ---
     all_ids = torch.arange(num_envs, device=dev)
 
@@ -304,6 +338,21 @@ def main():
             count = (crash_gate_mod == g).sum()
             if count > 0:
                 print(f"  Crashes approaching gate {g}: {count}")
+
+        # Per-crash details: spawn position and randomized params
+        crashed_indices = np.where(crashed_mask)[0]
+        print(f"\n  Per-crash details:")
+        for idx in crashed_indices:
+            xl = x_local[idx].item()
+            yl = y_local[idx].item()
+            selected = param_selections[idx]
+            print(f"    Env {idx}: x_local={xl:.3f}, y_local={yl:.3f}, gates_passed={gates_passed_np[idx]}")
+            print(f"      Randomized params: {selected}")
+            for k in selected:
+                val = param_readers[k]()[idx].item()
+                nom = nominal_values[k]
+                lo, hi = dr[k]
+                print(f"        {k}: {val:.6f} (nominal={nom:.6f}, range=[{lo:.6f}, {hi:.6f}])")
 
     print("=" * 60)
 
