@@ -294,13 +294,16 @@ class DefaultQuadcopterStrategy:
         if self.cfg.is_train:
             rand = torch.rand(n_reset, device=self.device)
             gate0 = torch.zeros(n_reset, device=self.device, dtype=self.env._idx_wp.dtype)
+            gate1 = torch.ones(n_reset, device=self.device, dtype=self.env._idx_wp.dtype)
             # Gates 2 and 3 are the power loop — randomly pick one of them
             power_loop_gates = torch.randint(2, 4, (n_reset,), device=self.device, dtype=self.env._idx_wp.dtype)
             # Random gate from the full set for general robustness
             n_gates = self.env._waypoints.shape[0]
             random_gates = torch.randint(0, n_gates, (n_reset,), device=self.device, dtype=self.env._idx_wp.dtype)
-            waypoint_indices = torch.where(rand < 0.5, gate0,
-                              torch.where(rand < 0.8, power_loop_gates, random_gates))
+            # 40% gate 0, 10% gate 1, 30% power loop (gates 2-3), 20% random
+            waypoint_indices = torch.where(rand < 0.4, gate0,
+                              torch.where(rand < 0.5, gate1,
+                              torch.where(rand < 0.8, power_loop_gates, random_gates)))
 
             # Domain randomization: re-randomize dynamics for reset envs
             self._randomize_dynamics(env_ids)

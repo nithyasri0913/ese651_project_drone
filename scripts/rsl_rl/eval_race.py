@@ -78,13 +78,76 @@ def main():
     n_gates = raw_env._waypoints.shape[0]
     gates_for_laps = n_gates * args_cli.num_laps
 
-    # --- Domain randomization (matching evaluation ranges from handout) ---
+    # --- Domain randomization (TA protocol: 3 of 9 params per env) ---
     cfg = raw_env.cfg
     strategy = raw_env.strategy
-    strategy._randomize_dynamics(torch.arange(num_envs, device=raw_env.device))
+    dev = raw_env.device
+
+    # First, set ALL parameters to nominal defaults for every env
+    raw_env._thrust_to_weight[:] = raw_env._twr_value
+    raw_env._K_aero[:, 0] = raw_env._k_aero_xy_value
+    raw_env._K_aero[:, 1] = raw_env._k_aero_xy_value
+    raw_env._K_aero[:, 2] = raw_env._k_aero_z_value
+    raw_env._kp_omega[:, 0] = raw_env._kp_omega_rp_value
+    raw_env._kp_omega[:, 1] = raw_env._kp_omega_rp_value
+    raw_env._ki_omega[:, 0] = raw_env._ki_omega_rp_value
+    raw_env._ki_omega[:, 1] = raw_env._ki_omega_rp_value
+    raw_env._kd_omega[:, 0] = raw_env._kd_omega_rp_value
+    raw_env._kd_omega[:, 1] = raw_env._kd_omega_rp_value
+    raw_env._kp_omega[:, 2] = raw_env._kp_omega_y_value
+    raw_env._ki_omega[:, 2] = raw_env._ki_omega_y_value
+    raw_env._kd_omega[:, 2] = raw_env._kd_omega_y_value
+    raw_env._tau_m[:] = raw_env._tau_m_value
+
+    # DR ranges (same as handout section 3.1)
+    dr = strategy._dr_ranges
+    # Map each param key to a function that applies a random sample for selected envs
+    param_appliers = {
+        'twr':         lambda ids, n: raw_env._thrust_to_weight.__setitem__(ids, torch.empty(n, device=dev).uniform_(*dr['twr'])),
+        'k_aero_xy':   lambda ids, n: (
+            raw_env._K_aero.__setitem__((ids, 0), torch.empty(n, device=dev).uniform_(*dr['k_aero_xy'])),
+            raw_env._K_aero.__setitem__((ids, 1), raw_env._K_aero[ids, 0]),
+        ),
+        'k_aero_z':    lambda ids, n: raw_env._K_aero.__setitem__((ids, 2), torch.empty(n, device=dev).uniform_(*dr['k_aero_z'])),
+        'kp_omega_rp': lambda ids, n: (
+            raw_env._kp_omega.__setitem__((ids, 0), torch.empty(n, device=dev).uniform_(*dr['kp_omega_rp'])),
+            raw_env._kp_omega.__setitem__((ids, 1), raw_env._kp_omega[ids, 0]),
+        ),
+        'ki_omega_rp': lambda ids, n: (
+            raw_env._ki_omega.__setitem__((ids, 0), torch.empty(n, device=dev).uniform_(*dr['ki_omega_rp'])),
+            raw_env._ki_omega.__setitem__((ids, 1), raw_env._ki_omega[ids, 0]),
+        ),
+        'kd_omega_rp': lambda ids, n: (
+            raw_env._kd_omega.__setitem__((ids, 0), torch.empty(n, device=dev).uniform_(*dr['kd_omega_rp'])),
+            raw_env._kd_omega.__setitem__((ids, 1), raw_env._kd_omega[ids, 0]),
+        ),
+        'kp_omega_y':  lambda ids, n: raw_env._kp_omega.__setitem__((ids, 2), torch.empty(n, device=dev).uniform_(*dr['kp_omega_y'])),
+        'ki_omega_y':  lambda ids, n: raw_env._ki_omega.__setitem__((ids, 2), torch.empty(n, device=dev).uniform_(*dr['ki_omega_y'])),
+        'kd_omega_y':  lambda ids, n: raw_env._kd_omega.__setitem__((ids, 2), torch.empty(n, device=dev).uniform_(*dr['kd_omega_y'])),
+    }
+    param_keys = list(param_appliers.keys())  # 9 params
+
+    # For each env, independently select 3 of 9 params to randomize
+    import random
+    random.seed(args_cli.seed)
+    param_selections = [random.sample(param_keys, 3) for _ in range(num_envs)]
+
+    # Apply: group envs by selected param for efficient batched writes
+    for key in param_keys:
+        env_indices = [i for i in range(num_envs) if key in param_selections[i]]
+        if env_indices:
+            ids = torch.tensor(env_indices, device=dev, dtype=torch.long)
+            param_appliers[key](ids, len(ids))
+
+    # Log the distribution of selected params
+    from collections import Counter
+    all_selected = [k for sel in param_selections for k in sel]
+    counts = Counter(all_selected)
+    print(f"[EVAL] DR protocol: 3 of 9 params per env (TA-matching)")
+    for k in param_keys:
+        print(f"  {k}: selected in {counts.get(k, 0)}/{num_envs} envs ({100*counts.get(k, 0)/num_envs:.1f}%)")
 
     # --- Reposition all drones with TA-spec spawn (ground level, randomized position) ---
-    dev = raw_env.device
     all_ids = torch.arange(num_envs, device=dev)
 
     gate0_pos = raw_env._waypoints[0]           # (6,) — x, y, z, roll, pitch, yaw
