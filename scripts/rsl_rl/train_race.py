@@ -110,17 +110,30 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         log_dir += f"_{agent_cfg.run_name}"
     log_dir = os.path.join(log_root_path, log_dir)
 
-    # TODO ----- START ----- Define rewards scales
-    gate_pass_reward_scale = 100.0   # large reward per gate passed
-    progress_reward_scale  = 2.0     # dense shaping: reward for closing distance to gate
-    crash_reward_scale     = -1.0    # per-step penalty when in contact
-    death_cost             = -50.0   # terminal penalty for crashing / leaving bounds
+    # # TODO ----- START ----- Define rewards scales
+    # gate_pass_reward_scale  = 100.0  
+    # vel_toward_reward_scale = 1.0   
+    # progress_reward_scale   = 2.0 
+    # centering_reward_scale  = 0.1    
+    # escape_reward_scale     = 2.0  
+    # crash_reward_scale      = -1.0
+    # death_cost              = -50.0 
+    gate_pass_reward_scale  = 100.0   
+    vel_toward_reward_scale = 0.5   
+    progress_reward_scale   = 2.0     
+    centering_reward_scale  = 0.2    
+    escape_reward_scale     = 2.0    
+    crash_reward_scale      = -4.0    
+    death_cost              = -50.0  
 
     rewards = {
-        'gate_pass_reward_scale': gate_pass_reward_scale,
-        'progress_reward_scale':  progress_reward_scale,
-        'crash_reward_scale':     crash_reward_scale,
-        'death_cost':             death_cost,
+        'gate_pass_reward_scale':  gate_pass_reward_scale,
+        'vel_toward_reward_scale': vel_toward_reward_scale,
+        'progress_reward_scale':   progress_reward_scale,
+        'centering_reward_scale':  centering_reward_scale,
+        'escape_reward_scale':     escape_reward_scale,
+        'crash_reward_scale':      crash_reward_scale,
+        'death_cost':              death_cost,
     }
     # TODO ----- END -----
 
