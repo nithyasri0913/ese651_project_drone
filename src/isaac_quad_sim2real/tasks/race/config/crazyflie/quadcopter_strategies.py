@@ -162,13 +162,28 @@ class DefaultQuadcopterStrategy:
         proximity_weight = torch.exp(-dist_to_gate)
         centering_penalty = -lateral_offset * proximity_weight
 
-        # 5. ESCAPE (post-gate-3: strong push toward gate 4)
+        # 5. ESCAPE (post-gate-2: push toward gate 3, post-gate-3: push toward gate 4)
+        is_post_gate2 = (self.env._idx_wp == 3).float()
+        gate2_pos = self.env._waypoints[2, :3]
+        gate3_pos = self.env._waypoints[3, :3]
+        dir_to_gate3 = gate3_pos - drone_pos_w
+        dir_to_gate3_norm = dir_to_gate3 / (torch.linalg.norm(dir_to_gate3, dim=1, keepdim=True) + 1e-6)
+        vel_to_gate3 = torch.sum(drone_vel_w * dir_to_gate3_norm, dim=1)
+        dir_from_gate2 = drone_pos_w - gate2_pos
+        dir_from_gate2_norm = dir_from_gate2 / (torch.linalg.norm(dir_from_gate2, dim=1, keepdim=True) + 1e-6)
+        vel_away_gate2 = torch.sum(drone_vel_w * dir_from_gate2_norm, dim=1)
+        dist_from_gate2 = torch.linalg.norm(dir_from_gate2, dim=1)
+        far_enough = (dist_from_gate2 > 1.0).float()
+        escape_gate2_reward = (torch.tanh(vel_away_gate2) * (1 - far_enough) + torch.tanh(vel_to_gate3) * far_enough) * is_post_gate2
+
         is_post_gate3 = (self.env._idx_wp == 4).float()
         gate4_pos = self.env._waypoints[4, :3]
         dir_to_gate4 = gate4_pos - drone_pos_w
         dir_to_gate4_norm = dir_to_gate4 / (torch.linalg.norm(dir_to_gate4, dim=1, keepdim=True) + 1e-6)
         vel_to_gate4 = torch.sum(drone_vel_w * dir_to_gate4_norm, dim=1)
-        escape_reward = torch.tanh(vel_to_gate4) * is_post_gate3
+        escape_gate3_reward = torch.tanh(vel_to_gate4) * is_post_gate3
+
+        escape_reward = escape_gate2_reward + escape_gate3_reward
 
         # 6. CRASH (penalty)
         crash_penalty = crashed.float()
