@@ -104,6 +104,57 @@ class DefaultQuadcopterStrategy:
         near_gate = dist_to_gate < 2.0
         gate_passed = gate_crossed & within_gate & near_gate
 
+        # --- Illegal gate crossing detection (all gates, not just target) ---
+        # Any passage through ANY gate frame that is not the current target in the
+        # correct direction is treated as a crash. This prevents the drone from
+        # flying through non-target gates (e.g. going back through gate 2 after
+        # passing it, then approaching gate 3 from the easy side).
+        n_gates = self.env._waypoints.shape[0]
+        drone_pos = self.env._robot.data.root_link_pos_w[:, :3]
+        num_envs = self.env.num_envs
+        original_idx_wp = self.env._idx_wp.clone()
+
+        # Compute drone position in ALL gate frames (batch)
+        drone_pos_exp = drone_pos.unsqueeze(1).expand(-1, n_gates, -1).reshape(-1, 3)
+        gate_pos_exp = self.env._waypoints[:, :3].unsqueeze(0).expand(num_envs, -1, -1).reshape(-1, 3)
+        gate_quat_exp = self.env._waypoints_quat.unsqueeze(0).expand(num_envs, -1, -1).reshape(-1, 4)
+        all_poses, _ = subtract_frame_transforms(gate_pos_exp, gate_quat_exp, drone_pos_exp)
+        all_poses = all_poses.reshape(num_envs, n_gates, 3)
+
+        x_all_now = all_poses[:, :, 0]
+        x_all_prev = self.env._prev_x_all_gates
+
+        crossed_fwd = (x_all_prev > 0) & (x_all_now <= 0)
+        crossed_bwd = (x_all_prev <= 0) & (x_all_now > 0)
+        within_all = (
+            (torch.abs(all_poses[:, :, 1]) < gate_half * 1.2) &
+            (torch.abs(all_poses[:, :, 2]) < gate_half * 1.2)
+        )
+        dist_all = torch.linalg.norm(all_poses, dim=2)
+        near_all = dist_all < 2.0
+        through_any = (crossed_fwd | crossed_bwd) & within_all & near_all
+
+        # Legal: current target gate, correct (forward) direction only
+        target_mask = torch.zeros(num_envs, n_gates, dtype=torch.bool, device=self.device)
+        target_mask.scatter_(1, original_idx_wp.long().unsqueeze(1), True)
+        legal = target_mask & crossed_fwd & within_all & near_all
+
+        # Track-specific: gates 3 and 6 share the same physical frame with
+        # opposite yaw. A correct pass through gate 3 registers as a reverse
+        # crossing of gate 6, and vice versa. Exclude the paired gate.
+        exclude_mask = torch.zeros(num_envs, n_gates, dtype=torch.bool, device=self.device)
+        exclude_mask[original_idx_wp == 3, 6] = True
+        exclude_mask[original_idx_wp == 6, 3] = True
+
+        illegal = through_any & ~legal & ~exclude_mask
+        illegal_any = illegal.any(dim=1)
+        ids_illegal = torch.where(illegal_any)[0]
+        if len(ids_illegal) > 0:
+            self.env._crashed[ids_illegal] = 101
+            self.env._wrong_way_crash[ids_illegal] = 1
+
+        self.env._prev_x_all_gates = x_all_now.clone()
+
         # advance waypoint
         ids_gate_passed = torch.where(gate_passed)[0]
         self.env._n_gates_passed[ids_gate_passed] += 1
@@ -412,4 +463,15 @@ class DefaultQuadcopterStrategy:
 
         self.env._prev_x_drone_wrt_gate[env_ids] = 1.0
 
+        # Initialize prev_x for all gates based on actual drone position
+        n_gates = self.env._waypoints.shape[0]
+        n_reset = len(env_ids)
+        drone_pos_reset = self.env._robot.data.root_link_state_w[env_ids, :3]
+        drone_exp = drone_pos_reset.unsqueeze(1).expand(-1, n_gates, -1).reshape(-1, 3)
+        gp_exp = self.env._waypoints[:, :3].unsqueeze(0).expand(n_reset, -1, -1).reshape(-1, 3)
+        gq_exp = self.env._waypoints_quat.unsqueeze(0).expand(n_reset, -1, -1).reshape(-1, 4)
+        all_poses_reset, _ = subtract_frame_transforms(gp_exp, gq_exp, drone_exp)
+        self.env._prev_x_all_gates[env_ids] = all_poses_reset.reshape(n_reset, n_gates, 3)[:, :, 0]
+
         self.env._crashed[env_ids] = 0
+        self.env._wrong_way_crash[env_ids] = 0

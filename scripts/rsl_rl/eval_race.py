@@ -233,6 +233,7 @@ def main():
     gates_passed = torch.zeros(num_envs, dtype=torch.long, device=dev)
     # Track peak gates per env (before any reset wipes the counter)
     peak_gates = torch.zeros(num_envs, dtype=torch.long, device=dev)
+    wrong_way_flags = torch.zeros(num_envs, dtype=torch.bool, device=dev)
 
     # Get initial observations
     obs = env.get_observations()
@@ -275,6 +276,7 @@ def main():
         if newly_crashed.any():
             gates_passed[newly_crashed] = peak_gates[newly_crashed]
             outcome[newly_crashed] = 2
+            wrong_way_flags[newly_crashed] = raw_env._wrong_way_crash[newly_crashed].bool()
             trial_done[newly_crashed] = True
             active = ~trial_done
 
@@ -329,15 +331,22 @@ def main():
         print("No trials completed 3 laps.")
 
     crashed_mask = (outcome_np == 2)
+    wrong_way_np = wrong_way_flags.cpu().numpy()
     if n_crashed > 0:
         crash_gates = gates_passed_np[crashed_mask]
+        n_wrong_way = wrong_way_np[crashed_mask].sum()
+        n_contact = n_crashed - n_wrong_way
         print(f"\nCrash statistics:")
+        print(f"  Contact crashes:   {n_contact}")
+        print(f"  Wrong-way crashes: {n_wrong_way}")
         print(f"  Avg gates before crash: {crash_gates.mean():.1f}")
         crash_gate_mod = crash_gates % n_gates
         for g in range(n_gates):
             count = (crash_gate_mod == g).sum()
+            ww_count = wrong_way_np[crashed_mask][crash_gate_mod == g].sum()
             if count > 0:
-                print(f"  Crashes approaching gate {g}: {count}")
+                ww_str = f" ({ww_count} wrong-way)" if ww_count > 0 else ""
+                print(f"  Crashes approaching gate {g}: {count}{ww_str}")
 
         # Per-crash details: spawn position and randomized params
         crashed_indices = np.where(crashed_mask)[0]
