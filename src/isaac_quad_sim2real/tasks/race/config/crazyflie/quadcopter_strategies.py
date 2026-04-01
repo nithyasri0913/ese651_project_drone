@@ -44,15 +44,15 @@ class DefaultQuadcopterStrategy:
 
         # Domain randomization ranges (matching evaluation conditions from handout)
         self._dr_ranges = {
-            'twr':          (self.cfg.thrust_to_weight * 0.95, self.cfg.thrust_to_weight * 1.05),
-            'k_aero_xy':    (self.cfg.k_aero_xy * 0.5,        self.cfg.k_aero_xy * 2.0),
-            'k_aero_z':     (self.cfg.k_aero_z * 0.5,         self.cfg.k_aero_z * 2.0),
-            'kp_omega_rp':  (self.cfg.kp_omega_rp * 0.85,     self.cfg.kp_omega_rp * 1.15),
-            'ki_omega_rp':  (self.cfg.ki_omega_rp * 0.85,     self.cfg.ki_omega_rp * 1.15),
-            'kd_omega_rp':  (self.cfg.kd_omega_rp * 0.7,      self.cfg.kd_omega_rp * 1.3),
-            'kp_omega_y':   (self.cfg.kp_omega_y * 0.85,      self.cfg.kp_omega_y * 1.15),
-            'ki_omega_y':   (self.cfg.ki_omega_y * 0.85,      self.cfg.ki_omega_y * 1.15),
-            'kd_omega_y':   (self.cfg.kd_omega_y * 0.7,       self.cfg.kd_omega_y * 1.3),
+            'twr':          (self.cfg.thrust_to_weight * 0.975, self.cfg.thrust_to_weight * 1.025),
+            'k_aero_xy':    (self.cfg.k_aero_xy * 0.75,        self.cfg.k_aero_xy * 1.5),
+            'k_aero_z':     (self.cfg.k_aero_z * 0.75,         self.cfg.k_aero_z * 1.5),
+            'kp_omega_rp':  (self.cfg.kp_omega_rp * 0.925,     self.cfg.kp_omega_rp * 1.075),
+            'ki_omega_rp':  (self.cfg.ki_omega_rp * 0.925,     self.cfg.ki_omega_rp * 1.075),
+            'kd_omega_rp':  (self.cfg.kd_omega_rp * 0.85,      self.cfg.kd_omega_rp * 1.15),
+            'kp_omega_y':   (self.cfg.kp_omega_y * 0.925,      self.cfg.kp_omega_y * 1.075),
+            'ki_omega_y':   (self.cfg.ki_omega_y * 0.925,      self.cfg.ki_omega_y * 1.075),
+            'kd_omega_y':   (self.cfg.kd_omega_y * 0.85,       self.cfg.kd_omega_y * 1.15),
         }
 
         # Apply initial domain randomization across all envs
@@ -204,24 +204,7 @@ class DefaultQuadcopterStrategy:
         vel_toward = torch.sum(drone_vel_w * dir_to_gate_norm, dim=1)
         vel_toward_reward = torch.tanh(vel_toward)
 
-        # 3. PROGRESS (distance reduction)
-        progress_reward = (self.env._last_distance_to_goal - dist_to_gate).clamp(min=-0.1, max=0.5)
-        self.env._last_distance_to_goal = dist_to_gate.clone()
-
-        # 4. CENTERING (lateral offset penalty, gated by proximity)
-        lateral_offset = torch.linalg.norm(self.env._pose_drone_wrt_gate[:, 1:3], dim=1)
-        proximity_weight = torch.exp(-dist_to_gate)
-        centering_penalty = -lateral_offset * proximity_weight
-
-        # 5. ESCAPE (post-gate-3: strong push toward gate 4)
-        is_post_gate3 = (self.env._idx_wp == 4).float()
-        gate4_pos = self.env._waypoints[4, :3]
-        dir_to_gate4 = gate4_pos - drone_pos_w
-        dir_to_gate4_norm = dir_to_gate4 / (torch.linalg.norm(dir_to_gate4, dim=1, keepdim=True) + 1e-6)
-        vel_to_gate4 = torch.sum(drone_vel_w * dir_to_gate4_norm, dim=1)
-        escape_reward = torch.tanh(vel_to_gate4) * is_post_gate3
-
-        # 6. CRASH (penalty)
+        # 3. CRASH (penalty)
         crash_penalty = crashed.float()
 
         # aggregate rewards with scales from config
@@ -229,9 +212,6 @@ class DefaultQuadcopterStrategy:
             rewards = {
                 "gate_pass":  gate_pass_reward * self.env.rew['gate_pass_reward_scale'],
                 "vel_toward": vel_toward_reward * self.env.rew['vel_toward_reward_scale'],
-                "progress":   progress_reward * self.env.rew['progress_reward_scale'],
-                "centering":  centering_penalty * self.env.rew['centering_reward_scale'],
-                "escape":     escape_reward * self.env.rew['escape_reward_scale'],
                 "crash":      crash_penalty * self.env.rew['crash_reward_scale'],
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
