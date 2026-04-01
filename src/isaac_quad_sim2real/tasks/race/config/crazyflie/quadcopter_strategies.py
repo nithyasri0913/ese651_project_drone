@@ -42,17 +42,30 @@ class DefaultQuadcopterStrategy:
                 for key in keys
             }
 
-        # Domain randomization ranges (matching evaluation conditions from handout)
+        # Domain randomization ranges — full handout ranges (used by eval script)
         self._dr_ranges = {
-            'twr':          (self.cfg.thrust_to_weight * 0.95, self.cfg.thrust_to_weight * 1.05),
-            'k_aero_xy':    (self.cfg.k_aero_xy * 0.5,        self.cfg.k_aero_xy * 2.0),
-            'k_aero_z':     (self.cfg.k_aero_z * 0.5,         self.cfg.k_aero_z * 2.0),
-            'kp_omega_rp':  (self.cfg.kp_omega_rp * 0.85,     self.cfg.kp_omega_rp * 1.15),
-            'ki_omega_rp':  (self.cfg.ki_omega_rp * 0.85,     self.cfg.ki_omega_rp * 1.15),
-            'kd_omega_rp':  (self.cfg.kd_omega_rp * 0.7,      self.cfg.kd_omega_rp * 1.3),
-            'kp_omega_y':   (self.cfg.kp_omega_y * 0.85,      self.cfg.kp_omega_y * 1.15),
-            'ki_omega_y':   (self.cfg.ki_omega_y * 0.85,      self.cfg.ki_omega_y * 1.15),
-            'kd_omega_y':   (self.cfg.kd_omega_y * 0.7,       self.cfg.kd_omega_y * 1.3),
+            'twr':          (self.cfg.thrust_to_weight * 0.95,   self.cfg.thrust_to_weight * 1.05),
+            'k_aero_xy':    (self.cfg.k_aero_xy * 0.5,          self.cfg.k_aero_xy * 2.0),
+            'k_aero_z':     (self.cfg.k_aero_z * 0.5,           self.cfg.k_aero_z * 2.0),
+            'kp_omega_rp':  (self.cfg.kp_omega_rp * 0.85,       self.cfg.kp_omega_rp * 1.15),
+            'ki_omega_rp':  (self.cfg.ki_omega_rp * 0.85,       self.cfg.ki_omega_rp * 1.15),
+            'kd_omega_rp':  (self.cfg.kd_omega_rp * 0.7,        self.cfg.kd_omega_rp * 1.3),
+            'kp_omega_y':   (self.cfg.kp_omega_y * 0.85,        self.cfg.kp_omega_y * 1.15),
+            'ki_omega_y':   (self.cfg.ki_omega_y * 0.85,        self.cfg.ki_omega_y * 1.15),
+            'kd_omega_y':   (self.cfg.kd_omega_y * 0.7,         self.cfg.kd_omega_y * 1.3),
+        }
+
+        # Training DR ranges — 75% of full handout range (lighter for faster learning)
+        self._train_dr_ranges = {
+            'twr':          (self.cfg.thrust_to_weight * 0.9625,  self.cfg.thrust_to_weight * 1.0375),
+            'k_aero_xy':    (self.cfg.k_aero_xy * 0.625,         self.cfg.k_aero_xy * 1.75),
+            'k_aero_z':     (self.cfg.k_aero_z * 0.625,          self.cfg.k_aero_z * 1.75),
+            'kp_omega_rp':  (self.cfg.kp_omega_rp * 0.8875,      self.cfg.kp_omega_rp * 1.1125),
+            'ki_omega_rp':  (self.cfg.ki_omega_rp * 0.8875,      self.cfg.ki_omega_rp * 1.1125),
+            'kd_omega_rp':  (self.cfg.kd_omega_rp * 0.775,       self.cfg.kd_omega_rp * 1.225),
+            'kp_omega_y':   (self.cfg.kp_omega_y * 0.8875,       self.cfg.kp_omega_y * 1.1125),
+            'ki_omega_y':   (self.cfg.ki_omega_y * 0.8875,       self.cfg.ki_omega_y * 1.1125),
+            'kd_omega_y':   (self.cfg.kd_omega_y * 0.775,        self.cfg.kd_omega_y * 1.225),
         }
 
         # Apply initial domain randomization across all envs
@@ -65,7 +78,7 @@ class DefaultQuadcopterStrategy:
     def _randomize_dynamics(self, env_ids: torch.Tensor):
         """Randomize physical parameters for the given environment indices."""
         n = len(env_ids)
-        dr = self._dr_ranges
+        dr = self._train_dr_ranges
 
         # Thrust to weight ratio
         self.env._thrust_to_weight[env_ids] = torch.empty(n, device=self.device).uniform_(*dr['twr'])
@@ -103,6 +116,57 @@ class DefaultQuadcopterStrategy:
         )
         near_gate = dist_to_gate < 2.0
         gate_passed = gate_crossed & within_gate & near_gate
+
+        # --- Illegal gate crossing detection (all gates, not just target) ---
+        # Any passage through ANY gate frame that is not the current target in the
+        # correct direction is treated as a crash. This prevents the drone from
+        # flying through non-target gates (e.g. going back through gate 2 after
+        # passing it, then approaching gate 3 from the easy side).
+        n_gates = self.env._waypoints.shape[0]
+        drone_pos = self.env._robot.data.root_link_pos_w[:, :3]
+        num_envs = self.env.num_envs
+        original_idx_wp = self.env._idx_wp.clone()
+
+        # Compute drone position in ALL gate frames (batch)
+        drone_pos_exp = drone_pos.unsqueeze(1).expand(-1, n_gates, -1).reshape(-1, 3)
+        gate_pos_exp = self.env._waypoints[:, :3].unsqueeze(0).expand(num_envs, -1, -1).reshape(-1, 3)
+        gate_quat_exp = self.env._waypoints_quat.unsqueeze(0).expand(num_envs, -1, -1).reshape(-1, 4)
+        all_poses, _ = subtract_frame_transforms(gate_pos_exp, gate_quat_exp, drone_pos_exp)
+        all_poses = all_poses.reshape(num_envs, n_gates, 3)
+
+        x_all_now = all_poses[:, :, 0]
+        x_all_prev = self.env._prev_x_all_gates
+
+        crossed_fwd = (x_all_prev > 0) & (x_all_now <= 0)
+        crossed_bwd = (x_all_prev <= 0) & (x_all_now > 0)
+        within_all = (
+            (torch.abs(all_poses[:, :, 1]) < gate_half * 1.2) &
+            (torch.abs(all_poses[:, :, 2]) < gate_half * 1.2)
+        )
+        dist_all = torch.linalg.norm(all_poses, dim=2)
+        near_all = dist_all < 2.0
+        through_any = (crossed_fwd | crossed_bwd) & within_all & near_all
+
+        # Legal: current target gate, correct (forward) direction only
+        target_mask = torch.zeros(num_envs, n_gates, dtype=torch.bool, device=self.device)
+        target_mask.scatter_(1, original_idx_wp.long().unsqueeze(1), True)
+        legal = target_mask & crossed_fwd & within_all & near_all
+
+        # Track-specific: gates 3 and 6 share the same physical frame with
+        # opposite yaw. A correct pass through gate 3 registers as a reverse
+        # crossing of gate 6, and vice versa. Exclude the paired gate.
+        exclude_mask = torch.zeros(num_envs, n_gates, dtype=torch.bool, device=self.device)
+        exclude_mask[original_idx_wp == 3, 6] = True
+        exclude_mask[original_idx_wp == 6, 3] = True
+
+        illegal = through_any & ~legal & ~exclude_mask
+        illegal_any = illegal.any(dim=1)
+        ids_illegal = torch.where(illegal_any)[0]
+        if len(ids_illegal) > 0:
+            self.env._crashed[ids_illegal] = 101
+            self.env._wrong_way_crash[ids_illegal] = 1
+
+        self.env._prev_x_all_gates = x_all_now.clone()
 
         # advance waypoint
         ids_gate_passed = torch.where(gate_passed)[0]
@@ -153,39 +217,7 @@ class DefaultQuadcopterStrategy:
         vel_toward = torch.sum(drone_vel_w * dir_to_gate_norm, dim=1)
         vel_toward_reward = torch.tanh(vel_toward)
 
-        # 3. PROGRESS (distance reduction)
-        progress_reward = (self.env._last_distance_to_goal - dist_to_gate).clamp(min=-0.1, max=0.5)
-        self.env._last_distance_to_goal = dist_to_gate.clone()
-
-        # 4. CENTERING (lateral offset penalty, gated by proximity)
-        lateral_offset = torch.linalg.norm(self.env._pose_drone_wrt_gate[:, 1:3], dim=1)
-        proximity_weight = torch.exp(-dist_to_gate)
-        centering_penalty = -lateral_offset * proximity_weight
-
-        # 5. ESCAPE (post-gate-2: push toward gate 3, post-gate-3: push toward gate 4)
-        is_post_gate2 = (self.env._idx_wp == 3).float()
-        gate2_pos = self.env._waypoints[2, :3]
-        gate3_pos = self.env._waypoints[3, :3]
-        dir_to_gate3 = gate3_pos - drone_pos_w
-        dir_to_gate3_norm = dir_to_gate3 / (torch.linalg.norm(dir_to_gate3, dim=1, keepdim=True) + 1e-6)
-        vel_to_gate3 = torch.sum(drone_vel_w * dir_to_gate3_norm, dim=1)
-        dir_from_gate2 = drone_pos_w - gate2_pos
-        dir_from_gate2_norm = dir_from_gate2 / (torch.linalg.norm(dir_from_gate2, dim=1, keepdim=True) + 1e-6)
-        vel_away_gate2 = torch.sum(drone_vel_w * dir_from_gate2_norm, dim=1)
-        dist_from_gate2 = torch.linalg.norm(dir_from_gate2, dim=1)
-        far_enough = (dist_from_gate2 > 1.0).float()
-        escape_gate2_reward = (torch.tanh(vel_away_gate2) * (1 - far_enough) + torch.tanh(vel_to_gate3) * far_enough) * is_post_gate2
-
-        is_post_gate3 = (self.env._idx_wp == 4).float()
-        gate4_pos = self.env._waypoints[4, :3]
-        dir_to_gate4 = gate4_pos - drone_pos_w
-        dir_to_gate4_norm = dir_to_gate4 / (torch.linalg.norm(dir_to_gate4, dim=1, keepdim=True) + 1e-6)
-        vel_to_gate4 = torch.sum(drone_vel_w * dir_to_gate4_norm, dim=1)
-        escape_gate3_reward = torch.tanh(vel_to_gate4) * is_post_gate3
-
-        escape_reward = escape_gate2_reward + escape_gate3_reward
-
-        # 6. CRASH (penalty)
+        # 3. CRASH (penalty)
         crash_penalty = crashed.float()
 
         # aggregate rewards with scales from config
@@ -193,9 +225,6 @@ class DefaultQuadcopterStrategy:
             rewards = {
                 "gate_pass":  gate_pass_reward * self.env.rew['gate_pass_reward_scale'],
                 "vel_toward": vel_toward_reward * self.env.rew['vel_toward_reward_scale'],
-                "progress":   progress_reward * self.env.rew['progress_reward_scale'],
-                "centering":  centering_penalty * self.env.rew['centering_reward_scale'],
-                "escape":     escape_reward * self.env.rew['escape_reward_scale'],
                 "crash":      crash_penalty * self.env.rew['crash_reward_scale'],
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
@@ -305,25 +334,22 @@ class DefaultQuadcopterStrategy:
 
         default_root_state = self.env._robot.data.default_root_state[env_ids]
 
-        # Curriculum reset: 50% gate 0, 30% gate 2 or 3 (power loop), 20% random other
+        # Uniform 8-way spawn: gates 1-6 (normal), gate 0 ground, gate 0 normal
         if self.cfg.is_train:
-            rand = torch.rand(n_reset, device=self.device)
-            gate0 = torch.zeros(n_reset, device=self.device, dtype=self.env._idx_wp.dtype)
-            gate1 = torch.ones(n_reset, device=self.device, dtype=self.env._idx_wp.dtype)
-            # Gates 2 and 3 are the power loop — randomly pick one of them
-            power_loop_gates = torch.randint(2, 4, (n_reset,), device=self.device, dtype=self.env._idx_wp.dtype)
-            # Random gate from the full set for general robustness
-            n_gates = self.env._waypoints.shape[0]
-            random_gates = torch.randint(0, n_gates, (n_reset,), device=self.device, dtype=self.env._idx_wp.dtype)
-            # 40% gate 0, 10% gate 1, 30% power loop (gates 2-3), 20% random
-            waypoint_indices = torch.where(rand < 0.4, gate0,
-                              torch.where(rand < 0.5, gate1,
-                              torch.where(rand < 0.8, power_loop_gates, random_gates)))
+            # 0 = gate 0 ground, 1-6 = gates 1-6, 7 = gate 0 normal
+            spawn_choice = torch.randint(0, 8, (n_reset,), device=self.device, dtype=self.env._idx_wp.dtype)
+            # Map spawn_choice to waypoint index: 7 -> 0, otherwise identity
+            waypoint_indices = torch.where(spawn_choice == 7,
+                torch.zeros(n_reset, device=self.device, dtype=self.env._idx_wp.dtype),
+                spawn_choice)
+            # Gate 0 ground spawn flag: only spawn_choice == 0
+            is_gate0_ground = (spawn_choice == 0)
 
             # Domain randomization: re-randomize dynamics for reset envs
             self._randomize_dynamics(env_ids)
         else:
             waypoint_indices = torch.zeros(n_reset, device=self.device, dtype=self.env._idx_wp.dtype)
+            is_gate0_ground = torch.ones(n_reset, device=self.device, dtype=torch.bool)
 
         # get starting pose behind gate in approach direction
         x0_wp = self.env._waypoints[waypoint_indices][:, 0]
@@ -331,13 +357,12 @@ class DefaultQuadcopterStrategy:
         theta  = self.env._waypoints[waypoint_indices][:, -1]
         z_wp   = self.env._waypoints[waypoint_indices][:, 2]
 
-        # Gate-0 starts: ground level with TA-spec position uncertainty
-        # Mid-track starts: at gate altitude with tighter noise
-        is_gate0 = (waypoint_indices == 0)
-        x_local = torch.where(is_gate0,
+        # Gate-0 ground starts: wide position range at ground level
+        # All other starts (including gate-0 normal): 2m in front at gate altitude
+        x_local = torch.where(is_gate0_ground,
             torch.empty(n_reset, device=self.device).uniform_(-3.0, -0.5),
             -2.0 * torch.ones(n_reset, device=self.device))
-        y_local = torch.where(is_gate0,
+        y_local = torch.where(is_gate0_ground,
             torch.empty(n_reset, device=self.device).uniform_(-1.0, 1.0),
             torch.empty(n_reset, device=self.device).uniform_(-0.4, 0.4))
 
@@ -348,9 +373,9 @@ class DefaultQuadcopterStrategy:
         y_rot = sin_theta * x_local + cos_theta * y_local
         initial_x = x0_wp - x_rot
         initial_y = y0_wp - y_rot
-        # Gate-0: ground level (0.05); mid-track: gate altitude ± noise
+        # Gate-0 ground: z=0.05; all others: gate altitude ± noise
         z_local = torch.empty(n_reset, device=self.device).uniform_(-0.2, 0.2)
-        initial_z = torch.where(is_gate0,
+        initial_z = torch.where(is_gate0_ground,
             0.05 * torch.ones(n_reset, device=self.device),
             z_local + z_wp)
 
@@ -427,4 +452,15 @@ class DefaultQuadcopterStrategy:
 
         self.env._prev_x_drone_wrt_gate[env_ids] = 1.0
 
+        # Initialize prev_x for all gates based on actual drone position
+        n_gates = self.env._waypoints.shape[0]
+        n_reset = len(env_ids)
+        drone_pos_reset = self.env._robot.data.root_link_state_w[env_ids, :3]
+        drone_exp = drone_pos_reset.unsqueeze(1).expand(-1, n_gates, -1).reshape(-1, 3)
+        gp_exp = self.env._waypoints[:, :3].unsqueeze(0).expand(n_reset, -1, -1).reshape(-1, 3)
+        gq_exp = self.env._waypoints_quat.unsqueeze(0).expand(n_reset, -1, -1).reshape(-1, 4)
+        all_poses_reset, _ = subtract_frame_transforms(gp_exp, gq_exp, drone_exp)
+        self.env._prev_x_all_gates[env_ids] = all_poses_reset.reshape(n_reset, n_gates, 3)[:, :, 0]
+
         self.env._crashed[env_ids] = 0
+        self.env._wrong_way_crash[env_ids] = 0
