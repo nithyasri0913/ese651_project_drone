@@ -42,17 +42,30 @@ class DefaultQuadcopterStrategy:
                 for key in keys
             }
 
-        # Domain randomization ranges (matching evaluation conditions from handout)
+        # Domain randomization ranges — full handout ranges (used by eval script)
         self._dr_ranges = {
-            'twr':          (self.cfg.thrust_to_weight * 0.975, self.cfg.thrust_to_weight * 1.025),
-            'k_aero_xy':    (self.cfg.k_aero_xy * 0.75,        self.cfg.k_aero_xy * 1.5),
-            'k_aero_z':     (self.cfg.k_aero_z * 0.75,         self.cfg.k_aero_z * 1.5),
-            'kp_omega_rp':  (self.cfg.kp_omega_rp * 0.925,     self.cfg.kp_omega_rp * 1.075),
-            'ki_omega_rp':  (self.cfg.ki_omega_rp * 0.925,     self.cfg.ki_omega_rp * 1.075),
-            'kd_omega_rp':  (self.cfg.kd_omega_rp * 0.85,      self.cfg.kd_omega_rp * 1.15),
-            'kp_omega_y':   (self.cfg.kp_omega_y * 0.925,      self.cfg.kp_omega_y * 1.075),
-            'ki_omega_y':   (self.cfg.ki_omega_y * 0.925,      self.cfg.ki_omega_y * 1.075),
-            'kd_omega_y':   (self.cfg.kd_omega_y * 0.85,       self.cfg.kd_omega_y * 1.15),
+            'twr':          (self.cfg.thrust_to_weight * 0.95,   self.cfg.thrust_to_weight * 1.05),
+            'k_aero_xy':    (self.cfg.k_aero_xy * 0.5,          self.cfg.k_aero_xy * 2.0),
+            'k_aero_z':     (self.cfg.k_aero_z * 0.5,           self.cfg.k_aero_z * 2.0),
+            'kp_omega_rp':  (self.cfg.kp_omega_rp * 0.85,       self.cfg.kp_omega_rp * 1.15),
+            'ki_omega_rp':  (self.cfg.ki_omega_rp * 0.85,       self.cfg.ki_omega_rp * 1.15),
+            'kd_omega_rp':  (self.cfg.kd_omega_rp * 0.7,        self.cfg.kd_omega_rp * 1.3),
+            'kp_omega_y':   (self.cfg.kp_omega_y * 0.85,        self.cfg.kp_omega_y * 1.15),
+            'ki_omega_y':   (self.cfg.ki_omega_y * 0.85,        self.cfg.ki_omega_y * 1.15),
+            'kd_omega_y':   (self.cfg.kd_omega_y * 0.7,         self.cfg.kd_omega_y * 1.3),
+        }
+
+        # Training DR ranges — 75% of full handout range (lighter for faster learning)
+        self._train_dr_ranges = {
+            'twr':          (self.cfg.thrust_to_weight * 0.9625,  self.cfg.thrust_to_weight * 1.0375),
+            'k_aero_xy':    (self.cfg.k_aero_xy * 0.625,         self.cfg.k_aero_xy * 1.75),
+            'k_aero_z':     (self.cfg.k_aero_z * 0.625,          self.cfg.k_aero_z * 1.75),
+            'kp_omega_rp':  (self.cfg.kp_omega_rp * 0.8875,      self.cfg.kp_omega_rp * 1.1125),
+            'ki_omega_rp':  (self.cfg.ki_omega_rp * 0.8875,      self.cfg.ki_omega_rp * 1.1125),
+            'kd_omega_rp':  (self.cfg.kd_omega_rp * 0.775,       self.cfg.kd_omega_rp * 1.225),
+            'kp_omega_y':   (self.cfg.kp_omega_y * 0.8875,       self.cfg.kp_omega_y * 1.1125),
+            'ki_omega_y':   (self.cfg.ki_omega_y * 0.8875,       self.cfg.ki_omega_y * 1.1125),
+            'kd_omega_y':   (self.cfg.kd_omega_y * 0.775,        self.cfg.kd_omega_y * 1.225),
         }
 
         # Apply initial domain randomization across all envs
@@ -65,7 +78,7 @@ class DefaultQuadcopterStrategy:
     def _randomize_dynamics(self, env_ids: torch.Tensor):
         """Randomize physical parameters for the given environment indices."""
         n = len(env_ids)
-        dr = self._dr_ranges
+        dr = self._train_dr_ranges
 
         # Thrust to weight ratio
         self.env._thrust_to_weight[env_ids] = torch.empty(n, device=self.device).uniform_(*dr['twr'])
@@ -321,25 +334,22 @@ class DefaultQuadcopterStrategy:
 
         default_root_state = self.env._robot.data.default_root_state[env_ids]
 
-        # Curriculum reset: 50% gate 0, 30% gate 2 or 3 (power loop), 20% random other
+        # Uniform 8-way spawn: gates 1-6 (normal), gate 0 ground, gate 0 normal
         if self.cfg.is_train:
-            rand = torch.rand(n_reset, device=self.device)
-            gate0 = torch.zeros(n_reset, device=self.device, dtype=self.env._idx_wp.dtype)
-            gate1 = torch.ones(n_reset, device=self.device, dtype=self.env._idx_wp.dtype)
-            # Gates 2 and 3 are the power loop — randomly pick one of them
-            power_loop_gates = torch.randint(2, 4, (n_reset,), device=self.device, dtype=self.env._idx_wp.dtype)
-            # Random gate from the full set for general robustness
-            n_gates = self.env._waypoints.shape[0]
-            random_gates = torch.randint(0, n_gates, (n_reset,), device=self.device, dtype=self.env._idx_wp.dtype)
-            # 40% gate 0, 10% gate 1, 30% power loop (gates 2-3), 20% random
-            waypoint_indices = torch.where(rand < 0.4, gate0,
-                              torch.where(rand < 0.5, gate1,
-                              torch.where(rand < 0.8, power_loop_gates, random_gates)))
+            # 0 = gate 0 ground, 1-6 = gates 1-6, 7 = gate 0 normal
+            spawn_choice = torch.randint(0, 8, (n_reset,), device=self.device, dtype=self.env._idx_wp.dtype)
+            # Map spawn_choice to waypoint index: 7 -> 0, otherwise identity
+            waypoint_indices = torch.where(spawn_choice == 7,
+                torch.zeros(n_reset, device=self.device, dtype=self.env._idx_wp.dtype),
+                spawn_choice)
+            # Gate 0 ground spawn flag: only spawn_choice == 0
+            is_gate0_ground = (spawn_choice == 0)
 
             # Domain randomization: re-randomize dynamics for reset envs
             self._randomize_dynamics(env_ids)
         else:
             waypoint_indices = torch.zeros(n_reset, device=self.device, dtype=self.env._idx_wp.dtype)
+            is_gate0_ground = torch.ones(n_reset, device=self.device, dtype=torch.bool)
 
         # get starting pose behind gate in approach direction
         x0_wp = self.env._waypoints[waypoint_indices][:, 0]
@@ -347,13 +357,12 @@ class DefaultQuadcopterStrategy:
         theta  = self.env._waypoints[waypoint_indices][:, -1]
         z_wp   = self.env._waypoints[waypoint_indices][:, 2]
 
-        # Gate-0 starts: ground level with TA-spec position uncertainty
-        # Mid-track starts: at gate altitude with tighter noise
-        is_gate0 = (waypoint_indices == 0)
-        x_local = torch.where(is_gate0,
+        # Gate-0 ground starts: wide position range at ground level
+        # All other starts (including gate-0 normal): 2m in front at gate altitude
+        x_local = torch.where(is_gate0_ground,
             torch.empty(n_reset, device=self.device).uniform_(-3.0, -0.5),
             -2.0 * torch.ones(n_reset, device=self.device))
-        y_local = torch.where(is_gate0,
+        y_local = torch.where(is_gate0_ground,
             torch.empty(n_reset, device=self.device).uniform_(-1.0, 1.0),
             torch.empty(n_reset, device=self.device).uniform_(-0.4, 0.4))
 
@@ -364,9 +373,9 @@ class DefaultQuadcopterStrategy:
         y_rot = sin_theta * x_local + cos_theta * y_local
         initial_x = x0_wp - x_rot
         initial_y = y0_wp - y_rot
-        # Gate-0: ground level (0.05); mid-track: gate altitude ± noise
+        # Gate-0 ground: z=0.05; all others: gate altitude ± noise
         z_local = torch.empty(n_reset, device=self.device).uniform_(-0.2, 0.2)
-        initial_z = torch.where(is_gate0,
+        initial_z = torch.where(is_gate0_ground,
             0.05 * torch.ones(n_reset, device=self.device),
             z_local + z_wp)
 
