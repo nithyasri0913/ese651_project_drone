@@ -80,13 +80,6 @@ class DefaultQuadcopterStrategy:
         # Used to compute time-based lap bonus (faster lap = bigger reward)
         self._lap_start_step = torch.zeros(self.num_envs, device=self.device)
 
-        # Ensure tensors added in our quadcopter_env.py exist even if the TA's
-        # original env file is used (which does not initialize these).
-        if not hasattr(env, '_wrong_way_crash'):
-            env._wrong_way_crash = torch.zeros(self.num_envs, device=self.device, dtype=torch.int)
-        if not hasattr(env, '_prev_x_all_gates'):
-            n_gates = env._waypoints.shape[0]
-            env._prev_x_all_gates = torch.ones(self.num_envs, n_gates, device=self.device)
         # Apply initial domain randomization across all envs
         all_ids = torch.arange(self.num_envs, device=self.device)
         self._randomize_dynamics(all_ids)
