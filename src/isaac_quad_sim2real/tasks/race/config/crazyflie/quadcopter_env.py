@@ -272,8 +272,6 @@ class QuadcopterEnv(DirectRLEnv):
         self._n_gates_passed = torch.zeros(self.num_envs, device=self.device, dtype=torch.int)
 
         self._crashed = torch.zeros(self.num_envs, device=self.device, dtype=torch.int)
-        self._wrong_way_crash = torch.zeros(self.num_envs, device=self.device, dtype=torch.int)
-        self._prev_x_all_gates = torch.ones(self.num_envs, self._waypoints.shape[0], device=self.device)  # initialized properly in strategy reset_idx
 
         # Motor dynamics
         self.cfg.thrust_to_weight = 3.15

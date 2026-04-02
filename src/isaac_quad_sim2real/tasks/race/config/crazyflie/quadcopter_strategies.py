@@ -68,6 +68,17 @@ class DefaultQuadcopterStrategy:
             'kd_omega_y':   (self.cfg.kd_omega_y * 0.775,        self.cfg.kd_omega_y * 1.225),
         }
 
+        # Lap timing: track step at which each env started its current lap
+        # Used to compute time-based lap bonus (faster lap = bigger reward)
+        self._lap_start_step = torch.zeros(self.num_envs, device=self.device)
+
+        # Ensure tensors added in our quadcopter_env.py exist even if the TA's
+        # original env file is used (which does not initialize these).
+        if not hasattr(env, '_wrong_way_crash'):
+            env._wrong_way_crash = torch.zeros(self.num_envs, device=self.device, dtype=torch.int)
+        if not hasattr(env, '_prev_x_all_gates'):
+            n_gates = env._waypoints.shape[0]
+            env._prev_x_all_gates = torch.ones(self.num_envs, n_gates, device=self.device)
         # Apply initial domain randomization across all envs
         all_ids = torch.arange(self.num_envs, device=self.device)
         self._randomize_dynamics(all_ids)
@@ -189,6 +200,17 @@ class DefaultQuadcopterStrategy:
                 self.env._pose_drone_wrt_gate[ids_gate_passed], dim=1
             )
 
+        # Lap bonus to reward faster lap completion
+        # Fires when full lap done
+        # Bonus = max(0, 1 - elapsed/target) — peaks at 1.0 for instant lap, 0 at/beyond target.
+        lap_bonus = torch.zeros(self.num_envs, device=self.device)
+        if len(ids_gate_passed) > 0:
+            newly_lapped = ids_gate_passed[self.env._idx_wp[ids_gate_passed] == 0]
+            if len(newly_lapped) > 0:
+                elapsed = self.env.episode_length_buf[newly_lapped].float() - self._lap_start_step[newly_lapped]
+                lap_bonus[newly_lapped] = (1.0 - (elapsed / 850.0).clamp(0, 1))
+                self._lap_start_step[newly_lapped] = self.env.episode_length_buf[newly_lapped].float()
+
         # Update prev_x
         self.env._prev_x_drone_wrt_gate = x_gate_now.clone()
         if len(ids_gate_passed) > 0:
@@ -226,6 +248,7 @@ class DefaultQuadcopterStrategy:
                 "gate_pass":  gate_pass_reward * self.env.rew['gate_pass_reward_scale'],
                 "vel_toward": vel_toward_reward * self.env.rew['vel_toward_reward_scale'],
                 "crash":      crash_penalty * self.env.rew['crash_reward_scale'],
+                "lap_bonus":  lap_bonus * self.env.rew['lap_bonus_reward_scale'],
             }
             reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
             reward = torch.where(
@@ -464,3 +487,4 @@ class DefaultQuadcopterStrategy:
 
         self.env._crashed[env_ids] = 0
         self.env._wrong_way_crash[env_ids] = 0
+        self._lap_start_step[env_ids] = self.env.episode_length_buf[env_ids].float()
