@@ -26,6 +26,7 @@ parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument("--max_steps", type=int, default=3000, help="Max steps per trial (default 3000 = 60s at 50Hz).")
 parser.add_argument("--num_laps", type=int, default=3, help="Number of laps to complete.")
+parser.add_argument("--no_crash_details", action="store_true", default=False, help="Suppress per-crash details printout.")
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -233,6 +234,7 @@ def main():
     gates_passed = torch.zeros(num_envs, dtype=torch.long, device=dev)
     # Track peak gates per env (before any reset wipes the counter)
     peak_gates = torch.zeros(num_envs, dtype=torch.long, device=dev)
+    wrong_way_flags = torch.zeros(num_envs, dtype=torch.bool, device=dev)
 
     # Get initial observations
     obs = env.get_observations()
@@ -275,6 +277,7 @@ def main():
         if newly_crashed.any():
             gates_passed[newly_crashed] = peak_gates[newly_crashed]
             outcome[newly_crashed] = 2
+            wrong_way_flags[newly_crashed] = raw_env._wrong_way_crash[newly_crashed].bool()
             trial_done[newly_crashed] = True
             active = ~trial_done
 
@@ -329,30 +332,38 @@ def main():
         print("No trials completed 3 laps.")
 
     crashed_mask = (outcome_np == 2)
+    wrong_way_np = wrong_way_flags.cpu().numpy()
     if n_crashed > 0:
         crash_gates = gates_passed_np[crashed_mask]
+        n_wrong_way = wrong_way_np[crashed_mask].sum()
+        n_contact = n_crashed - n_wrong_way
         print(f"\nCrash statistics:")
+        print(f"  Contact crashes:   {n_contact}")
+        print(f"  Wrong-way crashes: {n_wrong_way}")
         print(f"  Avg gates before crash: {crash_gates.mean():.1f}")
         crash_gate_mod = crash_gates % n_gates
         for g in range(n_gates):
             count = (crash_gate_mod == g).sum()
+            ww_count = wrong_way_np[crashed_mask][crash_gate_mod == g].sum()
             if count > 0:
-                print(f"  Crashes approaching gate {g}: {count}")
+                ww_str = f" ({ww_count} wrong-way)" if ww_count > 0 else ""
+                print(f"  Crashes approaching gate {g}: {count}{ww_str}")
 
         # Per-crash details: spawn position and randomized params
-        crashed_indices = np.where(crashed_mask)[0]
-        print(f"\n  Per-crash details:")
-        for idx in crashed_indices:
-            xl = x_local[idx].item()
-            yl = y_local[idx].item()
-            selected = param_selections[idx]
-            print(f"    Env {idx}: x_local={xl:.3f}, y_local={yl:.3f}, gates_passed={gates_passed_np[idx]}")
-            print(f"      Randomized params: {selected}")
-            for k in selected:
-                val = param_readers[k]()[idx].item()
-                nom = nominal_values[k]
-                lo, hi = dr[k]
-                print(f"        {k}: {val:.6f} (nominal={nom:.6f}, range=[{lo:.6f}, {hi:.6f}])")
+        if not args_cli.no_crash_details:
+            crashed_indices = np.where(crashed_mask)[0]
+            print(f"\n  Per-crash details:")
+            for idx in crashed_indices:
+                xl = x_local[idx].item()
+                yl = y_local[idx].item()
+                selected = param_selections[idx]
+                print(f"    Env {idx}: x_local={xl:.3f}, y_local={yl:.3f}, gates_passed={gates_passed_np[idx]}")
+                print(f"      Randomized params: {selected}")
+                for k in selected:
+                    val = param_readers[k]()[idx].item()
+                    nom = nominal_values[k]
+                    lo, hi = dr[k]
+                    print(f"        {k}: {val:.6f} (nominal={nom:.6f}, range=[{lo:.6f}, {hi:.6f}])")
 
     print("=" * 60)
 

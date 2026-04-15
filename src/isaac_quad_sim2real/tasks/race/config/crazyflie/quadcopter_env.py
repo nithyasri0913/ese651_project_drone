@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import torch
 import numpy as np
 
@@ -128,7 +129,7 @@ class GateModelCfg:
 @configclass
 class QuadcopterEnvCfg(DirectRLEnvCfg):
     use_wall = False
-    track_name = 'powerloop'
+    track_name = 'circle'
 
     # env
     episode_length_s = 30.0             # episode_length = episode_length_s / dt / decimation
@@ -136,7 +137,6 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     observation_space = 1 # inconsequential, just needs to exist for Gymnasium compatibility
     state_space = 0
     debug_vis = True
-
     sim_rate_hz = 500
     policy_rate_hz = 50
     pid_loop_rate_hz = 500
@@ -385,7 +385,7 @@ class QuadcopterEnv(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)
 
         self._gate_model_cfg_data = getattr(self.cfg, 'gate_model', {})
-        model_usd_file_path = self._gate_model_cfg_data.usd_path
+        model_usd_file_path = os.path.abspath(self._gate_model_cfg_data.usd_path)
 
         self._target_models_prim_base_name = self._gate_model_cfg_data.prim_name
 
@@ -421,6 +421,12 @@ class QuadcopterEnv(DirectRLEnv):
                 [-1.5, -3.5, 2.00, 0.0, 0.0, 2.356],
                 [2.0, -3.5, 0.75, 0.0, 0.0, -1.5708],
                 [0.625, 0.0, 0.75, 0.0, 0.0, -1.5708],
+            ],
+            'circle': [
+                [ 0.0,  3.0, 0.75, 0.0, 0.0,  0.00],
+                [-1.5,  4.5, 0.75, 0.0, 0.0, -1.57],
+                [ 0.0,  6.0, 1.75, 0.0, 0.0,  3.14],
+                [ 1.5,  4.5, 0.75, 0.0, 0.0,  1.57],
             ],
             'lemniscate': [
                 [ 1.5, 3.50, 0.75, 0.0, 0.0, -1.57],
