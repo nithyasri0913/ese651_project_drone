@@ -164,12 +164,11 @@ class DefaultQuadcopterStrategy:
         target_mask.scatter_(1, original_idx_wp.long().unsqueeze(1), True)
         legal = target_mask & crossed_fwd & within_all & near_all
 
-        # Track-specific: gates 3 and 6 share the same physical frame with
-        # opposite yaw. A correct pass through gate 3 registers as a reverse
-        # crossing of gate 6, and vice versa. Exclude the paired gate.
+        # Track-specific paired gate exclusion (powerloop only: gates 3 and 6 share frame)
         exclude_mask = torch.zeros(num_envs, n_gates, dtype=torch.bool, device=self.device)
-        exclude_mask[original_idx_wp == 3, 6] = True
-        exclude_mask[original_idx_wp == 6, 3] = True
+        if n_gates > 6:
+            exclude_mask[original_idx_wp == 3, 6] = True
+            exclude_mask[original_idx_wp == 6, 3] = True
 
         illegal = through_any & ~legal & ~exclude_mask
         illegal_any = illegal.any(dim=1)
@@ -266,40 +265,57 @@ class DefaultQuadcopterStrategy:
         return reward
 
     def get_observations(self) -> Dict[str, torch.Tensor]:
-        """Get observations. Read reset_idx() and quadcopter_env.py to see which drone info is extracted from the sim.
-        The following code is an example. You should delete it or heavily modify it once you begin the racing task."""
+        """Get observations including waypoint corner positions and drone state. (36-dim)
+        Matches controller_simple_policy.py: 3 lin_vel + 9 rot_mat + 12 curr_gate + 12 next_gate."""
+        curr_idx = self.env._idx_wp % self.env._waypoints.shape[0]
+        next_idx = (self.env._idx_wp + 1) % self.env._waypoints.shape[0]
 
-        # Drone state
-        drone_lin_vel_b = self.env._robot.data.root_com_lin_vel_b   # (N, 3) velocity in body frame
-        drone_ang_vel_b = self.env._robot.data.root_ang_vel_b        # (N, 3) body rates
-        drone_quat_w    = self.env._robot.data.root_quat_w           # (N, 4) orientation
+        wp_curr_pos = self.env._waypoints[curr_idx, :3]   # (N, 3)
+        wp_next_pos = self.env._waypoints[next_idx, :3]   # (N, 3)
+        quat_curr = self.env._waypoints_quat[curr_idx]    # (N, 4)
+        quat_next = self.env._waypoints_quat[next_idx]    # (N, 4)
 
-        # Current gate: drone position in gate frame (already computed in _get_dones)
-        drone_pos_curr_gate = self.env._pose_drone_wrt_gate          # (N, 3)
+        rot_curr = matrix_from_quat(quat_curr)  # (N, 3, 3)
+        rot_next = matrix_from_quat(quat_next)  # (N, 3, 3)
 
-        # Next gate: look-ahead so the policy can plan trajectories through gates
-        next_wp_idx = (self.env._idx_wp + 1) % self.env._waypoints.shape[0]
-        drone_pos_next_gate, _ = subtract_frame_transforms(
-            self.env._waypoints[next_wp_idx, :3],
-            self.env._waypoints_quat[next_wp_idx, :],
-            self.env._robot.data.root_link_pos_w,
-        )                                                             # (N, 3)
+        # Gate corner vertices in world frame: (N, 4, 3)
+        verts_curr = torch.bmm(self.env._local_square, rot_curr.transpose(1, 2)) + wp_curr_pos.unsqueeze(1) + self.env._terrain.env_origins.unsqueeze(1)
+        verts_next = torch.bmm(self.env._local_square, rot_next.transpose(1, 2)) + wp_next_pos.unsqueeze(1) + self.env._terrain.env_origins.unsqueeze(1)
 
-        # Previous actions for temporal smoothness awareness
-        prev_actions = self.env._previous_actions                    # (N, 4)
+        # Transform corners to drone body frame: repeat drone state 4x per env for each corner
+        drone_pos_rep  = self.env._robot.data.root_link_state_w[:, :3].repeat_interleave(4, dim=0)   # (4N, 3)
+        drone_quat_rep = self.env._robot.data.root_link_state_w[:, 3:7].repeat_interleave(4, dim=0)  # (4N, 4)
+
+        waypoint_pos_b_curr, _ = subtract_frame_transforms(drone_pos_rep, drone_quat_rep, verts_curr.view(-1, 3))
+        waypoint_pos_b_next, _ = subtract_frame_transforms(drone_pos_rep, drone_quat_rep, verts_next.view(-1, 3))
+
+        waypoint_pos_b_curr = waypoint_pos_b_curr.view(self.num_envs, 4, 3)  # (N, 4, 3)
+        waypoint_pos_b_next = waypoint_pos_b_next.view(self.num_envs, 4, 3)  # (N, 4, 3)
+
+        quat_w = self.env._robot.data.root_quat_w
+        attitude_mat = matrix_from_quat(quat_w)  # (N, 3, 3)
 
         obs = torch.cat(
             [
-                drone_lin_vel_b,      # 3  — velocity in body frame
-                drone_ang_vel_b,      # 3  — body rates
-                drone_quat_w,         # 4  — orientation
-                drone_pos_curr_gate,  # 3  — position relative to current gate
-                drone_pos_next_gate,  # 3  — position relative to next gate (look-ahead)
-                prev_actions,         # 4  — previous actions
-            ],                        # total: 20 dims
+                self.env._robot.data.root_com_lin_vel_b,                        # 3  — linear vel in body frame
+                attitude_mat.view(attitude_mat.shape[0], -1),                   # 9  — rotation matrix
+                waypoint_pos_b_curr.view(waypoint_pos_b_curr.shape[0], -1),     # 12 — corners of current gate
+                waypoint_pos_b_next.view(waypoint_pos_b_next.shape[0], -1),     # 12 — corners of next gate
+            ],
             dim=-1,
-        )
+        )  # total: 36 dims
         observations = {"policy": obs}
+
+        # Update yaw tracking for lap counting
+        rpy = euler_xyz_from_quat(quat_w)
+        yaw_w = wrap_to_pi(rpy[2])
+        delta_yaw = yaw_w - self.env._previous_yaw
+        self.env._previous_yaw = yaw_w
+        self.env._yaw_n_laps += torch.where(delta_yaw < -np.pi, 1, 0)
+        self.env._yaw_n_laps -= torch.where(delta_yaw > np.pi, 1, 0)
+        self.env.unwrapped_yaw = yaw_w + 2 * np.pi * self.env._yaw_n_laps
+
+        self.env._previous_actions = self.env._actions.clone()
 
         return observations
 
@@ -360,10 +376,11 @@ class DefaultQuadcopterStrategy:
 
         # Uniform 8-way spawn: gates 1-6 (normal), gate 0 ground, gate 0 normal
         if self.cfg.is_train:
-            # 0 = gate 0 ground, 1-6 = gates 1-6, 7 = gate 0 normal
-            spawn_choice = torch.randint(0, 8, (n_reset,), device=self.device, dtype=self.env._idx_wp.dtype)
-            # Map spawn_choice to waypoint index: 7 -> 0, otherwise identity
-            waypoint_indices = torch.where(spawn_choice == 7,
+            # 0 = gate 0 ground, 1..n_gates-1 = gates, n_gates = gate 0 normal
+            n_gates = self.env._waypoints.shape[0]
+            spawn_choice = torch.randint(0, n_gates + 1, (n_reset,), device=self.device, dtype=self.env._idx_wp.dtype)
+            # Map spawn_choice to waypoint index: n_gates -> 0, otherwise identity
+            waypoint_indices = torch.where(spawn_choice == n_gates,
                 torch.zeros(n_reset, device=self.device, dtype=self.env._idx_wp.dtype),
                 spawn_choice)
             # Gate 0 ground spawn flag: only spawn_choice == 0

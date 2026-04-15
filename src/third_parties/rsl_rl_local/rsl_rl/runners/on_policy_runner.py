@@ -62,6 +62,8 @@ class OnPolicyRunner:
         ).to(self.device)
 
         # Note: RND and symmetry functionality have been removed from the PPO implementation
+        self.alg_cfg.pop("rnd_cfg", None)
+        self.alg_cfg.pop("symmetry_cfg", None)
 
         # init algorithm
         alg_class = eval(self.alg_cfg.pop("class_name"))  # PPO
@@ -157,7 +159,8 @@ class OnPolicyRunner:
         start_iter = self.current_learning_iteration
         tot_iter = start_iter + num_learning_iterations
         for it in range(start_iter, tot_iter):
-            self.env.unwrapped.update_iteration(self.current_learning_iteration)
+            if hasattr(self.env.unwrapped, "update_iteration"):
+                self.env.unwrapped.update_iteration(self.current_learning_iteration)
             start = time.time()
             # Rollout
             with torch.inference_mode():

@@ -86,8 +86,8 @@ def main():
 
     if args_cli.follow_robot == -1:
         env_cfg.viewer.resolution = (1920, 1080)
-        env_cfg.viewer.eye = (8.0, 0.0, 5.0)
-        env_cfg.viewer.lookat = (0.0, 0.0, 1.0)
+        env_cfg.viewer.eye = (8.0, 4.5, 6.0)
+        env_cfg.viewer.lookat = (0.0, 4.5, 1.0)
     elif args_cli.follow_robot >= 0:
         env_cfg.viewer.eye = (-0.8, 0.8, 0.8)
         env_cfg.viewer.resolution = (1920, 1080)
