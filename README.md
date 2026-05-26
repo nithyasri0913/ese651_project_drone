@@ -14,8 +14,18 @@ This repository contains the codebase for training and evaluating end-to-end Rei
 
 ---
 
-## Repository Structure
+## Training Script
+python scripts/rsl_rl/train_race.py \
+    --task Isaac-Quadcopter-Race-v0 \
+    --num_envs 8192 \
+    --max_iterations 5000 \
+    --headless
 
+---
+
+##  Repository Structure
+
+```text
 ├── logs/rsl_rl/quadcopter_direct/   # Saved training checkpoints and tensorboard logs
 ├── scripts/
 │   └── rsl_rl/
@@ -24,10 +34,3 @@ This repository contains the codebase for training and evaluating end-to-end Rei
 ├── src/
 │   └── rsl_rl_custom/               # Custom core PPO implementation and policy networks
 └── README.md
-
-## Training Script
-python scripts/rsl_rl/train_race.py \
-    --task Isaac-Quadcopter-Race-v0 \
-    --num_envs 8192 \
-    --max_iterations 5000 \
-    --headless
